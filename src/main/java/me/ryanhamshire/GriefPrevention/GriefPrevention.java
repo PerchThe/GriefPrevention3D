@@ -315,6 +315,11 @@ public class GriefPrevention extends JavaPlugin
             }
         }
 
+        if (Bukkit.getPluginManager().isPluginEnabled("PlaceholderAPI")) {
+            new me.ryanhamshire.GriefPrevention.integration.PlaceholderAPIExpansion(this).register();
+        }
+
+
         //if not using the database because it's not configured or because there was a problem, use the file system to store data
         //this is the preferred method, as it's simpler than the database scenario
         if (this.dataStore == null)

@@ -1,5 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
 
     <groupId>com.griefprevention</groupId>
@@ -22,8 +24,13 @@
         <maven.compiler.release>21</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
-        <!-- Default empty argument line to prevent Surefire config causing crashes if no other JVM args are set. -->
         <argLine/>
+        <!-- Versions -->
+        <spigot.api.version>1.21-R0.1-SNAPSHOT</spigot.api.version>
+        <papi.version>2.11.6</papi.version>
+        <jetbrains.annotations.version>26.0.2</jetbrains.annotations.version>
+        <junit.jupiter.version>5.12.1</junit.jupiter.version>
+        <mockito.junit.version>5.16.0</mockito.junit.version>
     </properties>
 
     <issueManagement>
@@ -37,9 +44,22 @@
     </scm>
 
     <repositories>
+        <!-- Spigot snapshots for Bukkit/Spigot API -->
         <repository>
             <id>spigot-repo</id>
             <url>https://hub.spigotmc.org/nexus/content/repositories/snapshots/</url>
+        </repository>
+
+        <!-- PlaceholderAPI repo (required; not on Maven Central) -->
+        <repository>
+            <id>placeholderapi</id>
+            <url>https://repo.extendedclip.com/content/repositories/placeholderapi/</url>
+        </repository>
+
+        <!-- Explicitly add central in case your Maven settings override defaults -->
+        <repository>
+            <id>central</id>
+            <url>https://repo.maven.apache.org/maven2/</url>
         </repository>
     </repositories>
 
@@ -54,12 +74,14 @@
                 </includes>
             </resource>
         </resources>
+
         <plugins>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-compiler-plugin</artifactId>
                 <version>3.14.0</version>
             </plugin>
+
             <!-- Append git commit hash to version -->
             <plugin>
                 <groupId>io.github.git-commit-id</groupId>
@@ -75,6 +97,7 @@
                     </execution>
                 </executions>
             </plugin>
+
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-release-plugin</artifactId>
@@ -84,31 +107,25 @@
                     <allowTimestampedSnapshots>true</allowTimestampedSnapshots>
                 </configuration>
             </plugin>
+
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-dependency-plugin</artifactId>
                 <executions>
                     <execution>
                         <goals>
-                            <!-- Required to inflate Mockito jar location. -->
                             <goal>properties</goal>
                         </goals>
                     </execution>
                 </executions>
             </plugin>
+
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-surefire-plugin</artifactId>
                 <configuration>
-                    <!-- Add Mockito agent and retain existing JVM args, if any. -->
                     <argLine>@{argLine} -javaagent:${org.mockito:mockito-core:jar} -Xshare:off</argLine>
-                    <!-- GitHub Actions offers 2 cores for Linux. -->
                     <forkCount>2</forkCount>
-                    <!--
-                        This is somewhat required for testing Bukkit code due to Bukkit's design.
-                        There are so many static fields so deeply intertwined with each other
-                        that correctly initializing everything is a huge hassle.
-                     -->
                     <reuseForks>false</reuseForks>
                 </configuration>
             </plugin>
@@ -156,32 +173,41 @@
     </build>
 
     <dependencies>
-        <!-- Bukkit API. Bukkit has never ever deployed a release version -->
+        <!-- Bukkit / Spigot API (provided at runtime by server) -->
         <dependency>
             <groupId>org.spigotmc</groupId>
             <artifactId>spigot-api</artifactId>
-            <version>1.21-R0.1-SNAPSHOT</version>
+            <version>${spigot.api.version}</version>
             <scope>provided</scope>
         </dependency>
-        <!-- Annotations for nullity and other behaviors -->
+
+        <!-- PlaceholderAPI (compileOnly/provided; resolved via ExtendedClip repo) -->
+        <dependency>
+            <groupId>me.clip</groupId>
+            <artifactId>placeholderapi</artifactId>
+            <version>${papi.version}</version>
+            <scope>provided</scope>
+        </dependency>
+
+        <!-- JetBrains annotations -->
         <dependency>
             <groupId>org.jetbrains</groupId>
             <artifactId>annotations</artifactId>
-            <version>26.0.2</version>
-            <!-- Annotations are not required at runtime, only during compilation. -->
+            <version>${jetbrains.annotations.version}</version>
             <scope>provided</scope>
         </dependency>
+
         <!-- Tests -->
         <dependency>
             <groupId>org.junit.jupiter</groupId>
             <artifactId>junit-jupiter</artifactId>
-            <version>5.12.1</version>
+            <version>${junit.jupiter.version}</version>
             <scope>test</scope>
         </dependency>
         <dependency>
             <groupId>org.mockito</groupId>
             <artifactId>mockito-junit-jupiter</artifactId>
-            <version>5.16.0</version>
+            <version>${mockito.junit.version}</version>
             <scope>test</scope>
         </dependency>
     </dependencies>
@@ -196,5 +222,4 @@
             <url>https://oss.sonatype.org/service/local/staging/deploy/maven2/</url>
         </repository>
     </distributionManagement>
-
 </project>
