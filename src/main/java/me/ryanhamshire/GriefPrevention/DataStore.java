@@ -24,7 +24,6 @@ import com.griefprevention.visualization.VisualizationType;
 import me.ryanhamshire.GriefPrevention.events.ClaimCreatedEvent;
 import me.ryanhamshire.GriefPrevention.events.ClaimDeletedEvent;
 import me.ryanhamshire.GriefPrevention.events.ClaimExtendEvent;
-import me.ryanhamshire.GriefPrevention.events.ClaimModifiedEvent;
 import me.ryanhamshire.GriefPrevention.events.ClaimResizeEvent;
 import me.ryanhamshire.GriefPrevention.events.ClaimTransferEvent;
 import me.ryanhamshire.GriefPrevention.util.BoundingBox;
@@ -796,8 +795,8 @@ public abstract class DataStore
                         return better3D;
                     }
 
-                    // Prefer a matching child (handles 2D subdivisions) when cached claim is a parent
-                    if (cachedClaim.parent == null && !cachedClaim.children.isEmpty())
+                    // Prefer a matching child (handles nested subdivisions)
+                    if (!cachedClaim.children.isEmpty())
                     {
                         Claim bestChild = null;
                         for (Claim child : cachedClaim.children)
@@ -849,20 +848,36 @@ public abstract class DataStore
             }
             // If cached is 3D but doesn't accept Y, continue to full search below.
         }
-
         // Check all claims in the same chunks as the location
         Set<Claim> claimsInChunks = this.getChunkClaims(location.getWorld(), new BoundingBox(location.getBlock()));
         if (claimsInChunks.isEmpty()) return null;
 
-        // Find the smallest claim that contains the location
-        Claim smallestClaim = null;
-        Claim smallest3DClaim = null;
-        
+        List<Claim> containingClaims = new ArrayList<>();
         for (Claim claim : claimsInChunks)
         {
-            // Skip if the claim doesn't contain the location
-            if (!claim.contains(location, ignoreHeight, ignoreSubclaims)) continue;
+            collectClaimsContaining(claim, location, ignoreHeight, ignoreSubclaims, containingClaims);
+        }
 
+        if (containingClaims.isEmpty())
+        {
+            return null;
+        }
+
+        // Find the most specific claim at the location, prioritizing 3D subclaims that contain the Y coordinate
+        // This method handles the complex logic of claim prioritization:
+        // 1. Collect all claims that contain the location (respecting height boundaries where applicable)
+        // 2. Among 3D claims that contain the Y coordinate, prefer the one with the smallest Y-range (most specific)
+        // 3. Among 3D claims that don't contain the Y coordinate, treat them as regular 2D claim fallbacks
+        // 4. Among non-3D claims, prefer the one with the smallest area (most specific)
+        // 5. If we have both 3D and 2D claims, ensure we select the most appropriate 3D claim that contains the Y coordinate
+        // 6. Finally, if the selected claim is a parent claim, check if any of its children are more specific
+        // This ensures that stacked 3D subdivisions are handled correctly, with trust applied to the correct subclaim
+
+        Claim smallestClaim = null;
+        Claim smallest3DClaim = null;
+
+        for (Claim claim : containingClaims)
+        {
             // For 3D claims, verify Y coordinate
             if (claim.is3D())
             {
@@ -878,10 +893,10 @@ public abstract class DataStore
                         // Calculate Y-range for both claims
                         int currentYRange = claim.getGreaterBoundaryCorner().getBlockY() - claim.getLesserBoundaryCorner().getBlockY();
                         int smallestYRange = smallest3DClaim.getGreaterBoundaryCorner().getBlockY() - smallest3DClaim.getLesserBoundaryCorner().getBlockY();
-                        
+
                         // Prefer the claim with smaller Y-range (more specific), or smaller area if Y-ranges are equal
-                        if (currentYRange < smallestYRange || 
-                            (currentYRange == smallestYRange && claim.getArea() < smallest3DClaim.getArea()))
+                        if (currentYRange < smallestYRange ||
+                                (currentYRange == smallestYRange && claim.getArea() < smallest3DClaim.getArea()))
                         {
                             smallest3DClaim = claim;
                         }
@@ -908,6 +923,40 @@ public abstract class DataStore
 
         // Return 3D claim if found, otherwise return smallest non-3D claim
         Claim result = smallest3DClaim != null ? smallest3DClaim : smallestClaim;
+
+        // If we have both a 3D and 2D claim, but the selected 3D claim doesn't contain the Y coordinate,
+        // we should prefer the 2D claim. However, we need to ensure we select the correct 3D claim first.
+        if (smallest3DClaim != null && smallestClaim != null && smallest3DClaim != smallestClaim) {
+            if (!smallest3DClaim.containsY(location.getBlockY())) {
+                // If the currently selected 3D claim doesn't contain the Y coordinate,
+                // look for other 3D claims that do contain it and are more specific
+                Claim better3DClaim = null;
+                for (Claim claim : containingClaims) {
+                    if (claim.is3D() && claim.containsY(location.getBlockY())) {
+                        if (better3DClaim == null) {
+                            better3DClaim = claim;
+                        } else {
+                            // Prefer the claim with smaller Y-range (more specific), or smaller area if Y-ranges are equal
+                            int currentYRange = claim.getGreaterBoundaryCorner().getBlockY() - claim.getLesserBoundaryCorner().getBlockY();
+                            int bestYRange = better3DClaim.getGreaterBoundaryCorner().getBlockY() - better3DClaim.getLesserBoundaryCorner().getBlockY();
+
+                            if (currentYRange < bestYRange ||
+                                    (currentYRange == bestYRange && claim.getArea() < better3DClaim.getArea())) {
+                                better3DClaim = claim;
+                            }
+                        }
+                    }
+                }
+
+                // If we found a better 3D claim that contains the Y coordinate, use it
+                if (better3DClaim != null) {
+                    result = better3DClaim;
+                } else {
+                    // No 3D claim contains the Y coordinate, so prefer the 2D claim
+                    result = smallestClaim;
+                }
+            }
+        }
 
         // If subclaims are allowed and a parent claim was selected, prefer a matching child (handles 2D subdivisions)
         if (!ignoreSubclaims && result != null && result.parent == null && !result.children.isEmpty())
@@ -965,6 +1014,36 @@ public abstract class DataStore
 
         // Return the most specific claim found at this location
         return result;
+    }
+
+    private void collectClaimsContaining(Claim claim, Location location, boolean ignoreHeight, boolean ignoreSubclaims, List<Claim> results)
+    {
+        if (claim == null || !claim.inDataStore)
+        {
+            return;
+        }
+
+        if (!claim.contains(location, ignoreHeight, ignoreSubclaims))
+        {
+            return;
+        }
+
+        if (results.contains(claim))
+        {
+            return;
+        }
+
+        results.add(claim);
+
+        if (ignoreSubclaims)
+        {
+            return;
+        }
+
+        for (Claim child : claim.children)
+        {
+            collectClaimsContaining(child, location, ignoreHeight, false, results);
+        }
     }
 
     //finds a claim by ID
@@ -1117,6 +1196,7 @@ public abstract class DataStore
             bigz = z1;
         }
 
+        boolean is3D = false;
         if (parent != null)
         {
             Location lesser = parent.getLesserBoundaryCorner();
@@ -1126,6 +1206,73 @@ public abstract class DataStore
                 result.succeeded = false;
                 result.claim = parent;
                 return result;
+            }
+
+            int parentBottomY = lesser.getBlockY();
+            int worldMaxY = world.getMaxHeight();
+            boolean spansFullHeight = (smally == parentBottomY) && (bigy == worldMaxY);
+            is3D = !spansFullHeight;
+
+            if (GriefPrevention.instance.config_claims_allowNestedSubClaims && parent.is3D())
+            {
+                int inset = 1;
+
+                if (inset > 0)
+                {
+                    int minAllowedY = lesser.getBlockY() + inset;
+                    int maxAllowedY = greater.getBlockY() - inset;
+                    if (smally < minAllowedY || bigy > maxAllowedY)
+                    {
+                        result.succeeded = false;
+                        result.claim = parent;
+                        return result;
+                    }
+
+                    int parentMinX = lesser.getBlockX();
+                    int parentMaxX = greater.getBlockX();
+                    int parentMinZ = lesser.getBlockZ();
+                    int parentMaxZ = greater.getBlockZ();
+
+                    int minAllowedX = parentMinX + inset;
+                    int maxAllowedX = parentMaxX - inset;
+                    int minAllowedZ = parentMinZ + inset;
+                    int maxAllowedZ = parentMaxZ - inset;
+
+                    if (smallx < minAllowedX || bigx > maxAllowedX || smallz < minAllowedZ || bigz > maxAllowedZ)
+                    {
+                        result.succeeded = false;
+                        result.claim = parent;
+                        if (creatingPlayer != null)
+                        {
+                            GriefPrevention.sendMessage(creatingPlayer, TextMode.Err, Messages.InnerSubdivisionTooClose);
+                        }
+                        return result;
+                    }
+                }
+            }
+
+            if (!parent.is3D())
+            {
+                int inset = 1;
+
+                if (inset > 0)
+                {
+                    int insetMinX = lesser.getBlockX() + inset;
+                    int insetMaxX = greater.getBlockX() - inset;
+                    int insetMinZ = lesser.getBlockZ() + inset;
+                    int insetMaxZ = greater.getBlockZ() - inset;
+
+                    if (smallx < insetMinX || bigx > insetMaxX || smallz < insetMinZ || bigz > insetMaxZ)
+                    {
+                        result.succeeded = false;
+                        result.claim = parent;
+                        if (creatingPlayer != null)
+                        {
+                            GriefPrevention.sendMessage(creatingPlayer, TextMode.Err, Messages.InnerSubdivisionTooClose);
+                        }
+                        return result;
+                    }
+                }
             }
             // Preserve exact Y boundaries for subclaims (including single-layer 3D).
             // Previously, zero-height subclaims were sanitized to parent's bottom, unintentionally
@@ -1141,23 +1288,6 @@ public abstract class DataStore
         }
 
         //creative mode claims always go to bedrock
-        if (GriefPrevention.instance.config_claims_worldModes.get(world) == ClaimsMode.Creative)
-        {
-            smally = world.getMinHeight();
-        }
-
-        // Determine if this should be a 3D claim.
-        // Any subclaim that does NOT span the entire vertical height from the parent's bottom to world max
-        // is considered 3D, including single-layer (minY == maxY) subclaims.
-        boolean is3D = false;
-        if (parent != null) {
-            int parentBottomY = parent.getLesserBoundaryCorner().getBlockY();
-            int worldMaxY = world.getMaxHeight();
-            boolean spansFullHeight = (smally == parentBottomY) && (bigy == worldMaxY);
-            is3D = !spansFullHeight;
-        }
-
-        //create a new claim instance (but don't save it, yet)
         Claim newClaim = new Claim(
                 smallerBoundaryCorner,
                 greaterBoundaryCorner,
@@ -1166,16 +1296,17 @@ public abstract class DataStore
                 new ArrayList<>(),
                 new ArrayList<>(),
                 new ArrayList<>(),
-                false, // inheritNothing
+                false,
                 id,
                 is3D);
 
         newClaim.parent = parent;
 
-        //ensure this new claim won't overlap any existing claims
         ArrayList<Claim> claimsToCheck;
-        if (newClaim.parent != null)
+        if (parent != null)
         {
+            // Subdivisions should inherit trust from their parent hierarchy by default.
+            newClaim.setSubclaimRestrictions(false);
             claimsToCheck = newClaim.parent.children;
         }
         else
@@ -1185,9 +1316,129 @@ public abstract class DataStore
 
         for (Claim otherClaim : claimsToCheck)
         {
+            // Never treat the parent itself as an overlap when creating a nested subdivision.
+            if (otherClaim == newClaim.parent)
+            {
+                continue;
+            }
+
             //if we find an existing claim which will be overlapped
             if (otherClaim.id != newClaim.id && otherClaim.inDataStore && otherClaim.overlaps(newClaim))
             {
+                // Allow vertically separated 3D subdivisions inside the same parent when enabled.
+                if (newClaim.parent != null
+                        && GriefPrevention.instance.config_claims_allowNestedSubClaims
+                        && newClaim.is3D()
+                        && otherClaim.is3D()
+                        && otherClaim.parent == newClaim.parent)
+                {
+                    BoundingBox newBox = new BoundingBox(newClaim);
+                    BoundingBox otherBox = new BoundingBox(otherClaim);
+
+                    boolean horizontalOverlap = newBox.getMinX() <= otherBox.getMaxX()
+                            && newBox.getMaxX() >= otherBox.getMinX()
+                            && newBox.getMinZ() <= otherBox.getMaxZ()
+                            && newBox.getMaxZ() >= otherBox.getMinZ();
+                    boolean verticalSeparated = newBox.getMaxY() < otherBox.getMinY()
+                            || newBox.getMinY() > otherBox.getMaxY();
+
+                    if (horizontalOverlap)
+                    {
+                        if (newClaim.parent.is3D())
+                        {
+                            if (verticalSeparated)
+                            {
+                                continue;
+                            }
+                        }
+                        else if (verticalSeparated)
+                        {
+                            continue;
+                        }
+                    }
+                }
+
+                // Allow 2D siblings to touch borders without being considered overlapping.
+                if (!newClaim.is3D()
+                && !otherClaim.is3D()
+                && otherClaim.parent == newClaim.parent)
+                {
+                int overlapWidth = Math.min(
+                    newClaim.getGreaterBoundaryCorner().getBlockX(),
+                    otherClaim.getGreaterBoundaryCorner().getBlockX())
+                    - Math.max(
+                            newClaim.getLesserBoundaryCorner().getBlockX(),
+                            otherClaim.getLesserBoundaryCorner().getBlockX())
+                    + 1;
+                int overlapHeight = Math.min(
+                    newClaim.getGreaterBoundaryCorner().getBlockZ(),
+                    otherClaim.getGreaterBoundaryCorner().getBlockZ())
+                    - Math.max(
+                            newClaim.getLesserBoundaryCorner().getBlockZ(),
+                            otherClaim.getLesserBoundaryCorner().getBlockZ())
+                    + 1;
+
+                if (overlapWidth <= 0 || overlapHeight <= 0)
+                {
+                continue; // Touching edge or corner—no actual overlap volume.
+                }
+                }
+
+                // For top-level claims, don't fail if the overlapping claim is one of our own descendants (any depth)
+                // Subdivisions are supposed to be contained within their parent claim hierarchy
+                if (newClaim.parent == null && otherClaim.parent != null) {
+                    Claim cursor = otherClaim.parent;
+                    while (cursor != null) {
+                        if (cursor.id != null && cursor.id.equals(newClaim.id)) {
+                            // Overlap with a descendant; allowed
+                            otherClaim = null; // mark as handled
+                            break;
+                        }
+                        cursor = cursor.parent;
+                    }
+                    if (otherClaim == null) {
+                        continue;
+                    }
+                }
+
+                // Prevent parent/admin claims from overlapping other parent/admin claims
+                // But allow subdivisions to be created on the same X/Z borders
+                if (newClaim.parent == null && otherClaim.parent == null) {
+                    // Both are top-level claims (parent or admin claims) - prevent overlap
+                    result.succeeded = false;
+                    result.claim = otherClaim;
+                    return result;
+                }
+
+                // Special case: When resizing a top-level claim (dry run via createClaim during resize),
+                // allow zero-area intersection (edge/corner touching) with neighboring claims.
+                // This prevents false-positive conflicts when expanding from a corner shared with a child subdivision
+                // or when only borders touch, while still blocking any real area overlap.
+                if (dryRun && newClaim.parent == null)
+                {
+                    // Compute X/Z overlap extents (inclusive bounds)
+                    int aMinX = newClaim.getLesserBoundaryCorner().getBlockX();
+                    int aMaxX = newClaim.getGreaterBoundaryCorner().getBlockX();
+                    int aMinZ = newClaim.getLesserBoundaryCorner().getBlockZ();
+                    int aMaxZ = newClaim.getGreaterBoundaryCorner().getBlockZ();
+
+                    int bMinX = otherClaim.getLesserBoundaryCorner().getBlockX();
+                    int bMaxX = otherClaim.getGreaterBoundaryCorner().getBlockX();
+                    int bMinZ = otherClaim.getLesserBoundaryCorner().getBlockZ();
+                    int bMaxZ = otherClaim.getGreaterBoundaryCorner().getBlockZ();
+
+                    int overlapX = Math.min(aMaxX, bMaxX) - Math.max(aMinX, bMinX);
+                    int overlapZ = Math.min(aMaxZ, bMaxZ) - Math.max(aMinZ, bMinZ);
+
+                    // If either dimension has zero overlap width, this is an edge or corner touch, not an area overlap.
+                    boolean zeroAreaTouch = overlapX == 0 || overlapZ == 0;
+                    if (zeroAreaTouch)
+                    {
+                        // Treat border/corner touching as non-conflict in resize dry-run of a top-level claim.
+                        continue;
+                    }
+                }
+
                 //result = fail, return conflicting claim
                 result.succeeded = false;
                 result.claim = otherClaim;
@@ -1371,6 +1622,11 @@ public abstract class DataStore
     //see CreateClaim() for details on return value
     synchronized public CreateClaimResult resizeClaim(Claim claim, int newx1, int newx2, int newy1, int newy2, int newz1, int newz2, Player resizingPlayer)
     {
+        // Allow 3D single-layer subdivisions to expand vertically when resizing.
+        // PlayerEventHandler computes newy1/newy2 based on the drag direction, including the
+        // special case where a 3D claim is a single layer (nx1xn). Do not coerce Y to a single
+        // layer here; accept the requested vertical span.
+
         //try to create this new claim, ignoring the original when checking for overlap
         CreateClaimResult result = this.createClaim(claim.getLesserBoundaryCorner().getWorld(), newx1, newx2, newy1, newy2, newz1, newz2, claim.ownerID, claim.parent, claim.id, resizingPlayer, true);
 
@@ -1471,9 +1727,135 @@ public abstract class DataStore
         World world = newClaim.getLesserBoundaryCorner().getWorld();
         newClaim.lesserBoundaryCorner = new Location(world, newx1, newy1, newz1);
         newClaim.greaterBoundaryCorner = new Location(world, newx2, newy2, newz2);
+        // Ensure resized subdivisions stay inside parent bounds and avoid sibling overlap.
+        if (newClaim.parent != null)
+        {
+            Claim parentClaim = newClaim.parent;
+            BoundingBox newBox = new BoundingBox(newClaim);
+            BoundingBox parentBox = new BoundingBox(parentClaim);
+
+            int newMinX = newBox.getMinX();
+            int newMaxX = newBox.getMaxX();
+            int newMinZ = newBox.getMinZ();
+            int newMaxZ = newBox.getMaxZ();
+            int newMinY = newBox.getMinY();
+            int newMaxY = newBox.getMaxY();
+
+            int parentMinX = parentBox.getMinX();
+            int parentMaxX = parentBox.getMaxX();
+            int parentMinZ = parentBox.getMinZ();
+            int parentMaxZ = parentBox.getMaxZ();
+            int parentMinY = parentBox.getMinY();
+            int parentMaxY = parentBox.getMaxY();
+
+            boolean parentIsSubdivision = parentClaim.parent != null;
+            int inset = parentIsSubdivision ? 1 : 0;
+
+            boolean violatesParentBounds;
+            if (parentClaim.is3D())
+            {
+                violatesParentBounds = newMinX < parentMinX + inset
+                        || newMaxX > parentMaxX - inset
+                        || newMinZ < parentMinZ + inset
+                        || newMaxZ > parentMaxZ - inset
+                        || newMinY < parentMinY + inset
+                        || newMaxY > parentMaxY - inset;
+            }
+            else
+            {
+                violatesParentBounds = newMinX < parentMinX + inset
+                        || newMaxX > parentMaxX - inset
+                        || newMinZ < parentMinZ + inset
+                        || newMaxZ > parentMaxZ - inset;
+            }
+
+            if (violatesParentBounds)
+            {
+                GriefPrevention.sendMessage(player, TextMode.Err, Messages.InnerSubdivisionTooClose);
+                return;
+            }
+
+            if (parentClaim.children != null)
+            {
+                for (Claim sibling : parentClaim.children)
+                {
+                    if (sibling == oldClaim || !sibling.inDataStore)
+                    {
+                        continue;
+                    }
+
+                    BoundingBox siblingBox = new BoundingBox(sibling);
+
+                    boolean xOverlap = newMinX <= siblingBox.getMaxX() && newMaxX >= siblingBox.getMinX();
+                    boolean zOverlap = newMinZ <= siblingBox.getMaxZ() && newMaxZ >= siblingBox.getMinZ();
+                    if (!xOverlap || !zOverlap)
+                    {
+                        continue;
+                    }
+
+                    boolean verticalSeparated = newMaxY < siblingBox.getMinY() || newMinY > siblingBox.getMaxY();
+                    if (parentClaim.is3D())
+                    {
+                        boolean allowVerticalStacking = GriefPrevention.instance.config_claims_allowNestedSubClaims
+                                && newClaim.is3D()
+                                && sibling.is3D();
+                        if (allowVerticalStacking && verticalSeparated)
+                        {
+                            continue;
+                        }
+                    }
+                    else if (verticalSeparated)
+                    {
+                        continue;
+                    }
+
+                    if (!newClaim.is3D() && !sibling.is3D())
+                    {
+                        int overlapWidth = Math.min(newBox.getMaxX(), siblingBox.getMaxX())
+                                - Math.max(newBox.getMinX(), siblingBox.getMinX()) + 1;
+                        int overlapDepth = Math.min(newBox.getMaxZ(), siblingBox.getMaxZ())
+                                - Math.max(newBox.getMinZ(), siblingBox.getMinZ()) + 1;
+
+                        if (overlapWidth <= 0 || overlapDepth <= 0)
+                        {
+                            continue;
+                        }
+                    }
+
+                    GriefPrevention.sendMessage(player, TextMode.Err, Messages.ResizeFailOverlapSubdivision);
+                    return;
+                }
+            }
+        }
+
+        // Check if the new boundaries would intersect with any existing subdivisions
+        if (playerData.claimResizing.children != null && !playerData.claimResizing.children.isEmpty()) {
+            int newMinX = Math.min(newx1, newx2);
+            int newMaxX = Math.max(newx1, newx2);
+            int newMinY = Math.min(newy1, newy2);
+            int newMaxY = Math.max(newy1, newy2);
+            int newMinZ = Math.min(newz1, newz2);
+            int newMaxZ = Math.max(newz1, newz2);
+            
+            for (Claim child : playerData.claimResizing.children) {
+                Location childMin = child.getLesserBoundaryCorner();
+                Location childMax = child.getGreaterBoundaryCorner();
+
+                // New containment rule for main-claim resize with children (X/Z only, Y ignored):
+                // Child must be fully contained or exactly flush with the new parent X/Z bounds.
+                boolean containedX = newMinX <= childMin.getBlockX() && newMaxX >= childMax.getBlockX();
+                boolean containedZ = newMinZ <= childMin.getBlockZ() && newMaxZ >= childMax.getBlockZ();
+
+                if (!(containedX && containedZ)) {
+                    GriefPrevention.sendMessage(player, TextMode.Err,
+                        Messages.ResizeFailSubdivision);
+                    return;
+                }
+            }
+        }
 
         //call event here to check if it has been cancelled
-        ClaimResizeEvent event = new ClaimModifiedEvent(oldClaim, newClaim, player); // Swap to ClaimResizeEvent when ClaimModifiedEvent is removed
+        ClaimResizeEvent event = new ClaimResizeEvent(oldClaim, newClaim, player);
         Bukkit.getPluginManager().callEvent(event);
 
         //return here if event is cancelled
@@ -1599,7 +1981,10 @@ public abstract class DataStore
             //support color codes
             if (message != Messages.HowToClaimRegex)
             {
-                this.messages[message.ordinal()] = this.messages[message.ordinal()].replace('$', (char) 0x00A7);
+                // Support both $ and & prefixes so users can paste codes from common generators.
+                this.messages[message.ordinal()] = this.messages[message.ordinal()]
+                        .replace('$', (char) 0x00A7)
+                        .replace('&', (char) 0x00A7);
             }
 
             if (message.notes != null)
