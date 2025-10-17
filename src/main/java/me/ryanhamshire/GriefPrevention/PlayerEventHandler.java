@@ -25,6 +25,7 @@
  import com.griefprevention.visualization.VisualizationType;
  import me.ryanhamshire.GriefPrevention.events.ClaimInspectionEvent;
  import me.ryanhamshire.GriefPrevention.util.BoundingBox;
+ import org.bukkit.event.entity.EntityMountEvent;
  import org.bukkit.BanList;
  import org.bukkit.Bukkit;
  import org.bukkit.ChatColor;
@@ -436,7 +437,39 @@ import me.ryanhamshire.GriefPrevention.util.SchedulerUtil;
  
          return false;
      }
- 
+
+      @EventHandler(ignoreCancelled = true, priority = EventPriority.LOWEST)
+     public void onMountRequiresAccessTrust(EntityMountEvent event) {
+         // Only care about players mounting living rideable animals
+         if (!(event.getEntity() instanceof Player player)) return;
+         final Entity mount = event.getMount();
+
+         // Only run where GP claims are enabled
+         if (!instance.claimsEnabledForWorld(mount.getWorld())) return;
+
+         // Boats/minecarts are Vehicles, not Animals; we leave those alone.
+         // Animals covers horses/donkeys/mules/llamas/camels/pigs/striders, etc.
+         if (!(mount instanceof Animals)) return;
+
+         PlayerData playerData = this.dataStore.getPlayerData(player.getUniqueId());
+
+         // Ignore-claims mode bypasses protections (consistent with GP)
+         if (playerData.ignoreClaims) return;
+
+         // Find claim at mount location
+         Claim claim = this.dataStore.getClaimAt(mount.getLocation(), false, playerData.lastClaim);
+         if (claim == null) return;
+
+         playerData.lastClaim = claim;
+
+         // Require AccessTrust to mount animals inside claims
+         Supplier<String> denial = claim.checkPermission(player, ClaimPermission.Access, event);
+         if (denial != null) {
+             event.setCancelled(true);
+             GriefPrevention.sendRateLimitedErrorMessage(player, denial.get());
+         }
+     }
+
      //when a player uses a slash command...
      @EventHandler(ignoreCancelled = true, priority = EventPriority.LOWEST)
      synchronized void onPlayerCommandPreprocess(PlayerCommandPreprocessEvent event)
