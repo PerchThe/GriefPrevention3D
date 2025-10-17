@@ -26,7 +26,7 @@
         <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
         <argLine/>
         <!-- Versions -->
-        <spigot.api.version>1.21-R0.1-SNAPSHOT</spigot.api.version>
+        <spigot.api.version>1.21.8-R0.1-SNAPSHOT</spigot.api.version>
         <papi.version>2.11.6</papi.version>
         <jetbrains.annotations.version>26.0.2</jetbrains.annotations.version>
         <junit.jupiter.version>5.12.1</junit.jupiter.version>
